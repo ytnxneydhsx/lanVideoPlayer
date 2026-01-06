@@ -45,7 +45,7 @@ classDiagram
     SourceFactory ..> BaseSource : Instantiates
 ```
 
-## 2. 关键类设计 (Class Design)
+## 2. 源插件系统 (Source Plugin System)
 
 ### 2.1 源基类 (`pipeline/sources/base.py`)
 ```python
@@ -85,6 +85,34 @@ class CameraSource(BaseSource):
         return cmd
 ```
 
+**ScreenSource (屏幕共享)**:
+```python
+class ScreenSource(BaseSource):
+    def build_cmd(self, rtmp_url, params):
+        cmd = [
+            "-f", "gdigrab",
+            "-framerate", "30",
+            "-i", "desktop"
+        ]
+        # 如果配置了声卡内录
+        if self.audio_dev:
+             cmd += ["-f", "dshow", "-i", f"audio={self.audio_dev}"]
+        return cmd
+```
+
+**FileSource (本地文件)**:
+```python
+class FileSource(BaseSource):
+    def build_cmd(self, rtmp_url, params):
+        return [
+            "-re", 
+            "-stream_loop", "-1",
+            "-i", self.file_path,
+            "-c:v", "copy", # 文件模式尝试直接推流
+            "-c:a", "copy"
+        ]
+```
+
 ### 2.3 配置文件 (`config/sources.yaml`)
 这是 Sender 的“控制面板”。
 
@@ -110,7 +138,7 @@ sources:
 
 ---
 
-## 3. FFmpeg 参数调优与标准化 (Standardization)
+## 3. 推流引擎 (Streaming Engine)
 
 为了保证 SRS 能够稳定接收，无论输入源是什么，输出流必须符合统一规范。
 
@@ -131,76 +159,42 @@ common_output_args = [
 ]
 ```
 
-### 3.2 屏幕共享模式 (Screen Mode)
-```python
-# ScreenSource.build_ffmpeg_cmd()
-cmd = [
-    "-f", "gdigrab",
-    "-framerate", "30",
-    "-i", "desktop",  # 捕获整个桌面
-    "-f", "dshow",    # 混入系统声音 (Stereo Mix) - 需要系统开启
-    "-i", "audio=Stereo Mix (Realtek)",
-    ...common_output_args
-]
-```
+### 3.2 进程管理 (`StreamManager`)
+- 维护 `active_streams` 字典。
+- 使用 `asyncio.create_subprocess_exec` 启动进程。
+- 捕获 `stdout/stderr` 并重定向到 `logs/sender/ffmpeg.log`。
 
 ---
 
-## 4. 业务逻辑状态机 (FSM)
+## 4. 信令与发现 (Signaling & Discovery)
 
-Sender 的每个 Source 都有独立的状态流转：
+### 4.1 UDP 发现
+- 监听端口: `9999`
+- 广播 payload: `{"magic": "lan_video_discovery_v1"}`
+- 目标: 获取 Core IP。
 
-- **IDLE**: 初始状态，无 FFmpeg 运行。
-- **STARTING**: 收到 `cmd_start`，正在启动 FFmpeg。
-- **STREAMING**: FFmpeg 运行中，且 `poll()` 返回 None。
-- **ERROR**: FFmpeg 意外退出（exit code != 0）。自动重试 3 次后放弃。
+### 4.2 WebSocket 协议
+- 连接地址: `ws://{core_ip}:8000/ws/sender/{device_id}`
+- 注册包: 读取 `sources.yaml`，将所有源的 ID 和 Type 上报给 Core。
 
-## 5. 详细业务逻辑流 (Detailed Business Logic)
+---
+
+## 5. 业务全流程 (Business Logic)
 
 ### 5.1 启动全流程 (Startup Sequence)
 
-1.  **插件加载**: 
-    - 扫描 `pipeline/sources/impl/`，实例化所有 `BaseSource` 子类。
-    - 聚合生成全局 `sources_list`。
-2.  **寻找组织 (Discovery)**:
-    - 启动 UDP Listener 监听 9999 端口。
-    - 每 2 秒发送广播包 `{"magic": "lan_video_discovery_v1"}`。
-    - **Blocking**: 直到收到 Core 回复 `{"ip": "192.168.1.100"}`。
-3.  **建立信令 (Signaling)**:
-    - 连接 `ws://192.168.1.100:8000/ws/sender/{my_mac_addr}`。
-    - 发送 `register` 包，附带 `sources_list`。
-    - 启动心跳协程 `heartbeat_loop`。
+1.  **加载配置**: 解析 YAML，初始化 Source 对象池。
+2.  **寻找组织**: UDP 广播直到收到回复。
+3.  **注册**: 连上 WS，告诉 Core "我有摄像头 A 和屏幕 B"。
+4.  **待机**: 进入 IDLE 状态，开启心跳。
 
 ### 5.2 动态推流控制 (Dynamic Streaming)
 
 当收到 `cmd_start` 消息时：
-1.  **参数提取**: 获取 `source_id`, `rtmp_url`, `resolution`。
-2.  **插件路由**:
-    - 根据 `source_id` 找到对应的 Source 实例 (e.g., "cam01" -> CameraSource)。
-    - 调用 `source.build_ffmpeg_cmd(...)` 获取命令。
-3.  **冲突检查**: 
-    - 检查 `active_streams` 中是否已有该 `source_id` 的任务？
-    - 如果有，先执行 `stop_stream` 强制停止旧任务（重置）。
-4.  **启动进程**:
-    - 组装 FFmpeg 命令。
-    - `subprocess.Popen(cmd, stdout=PIPE, stderr=PIPE)`。
-    - 将 `PID` 存入 `active_streams[source_id]`。
-5.  **状态反馈**: 向 Core 发送 `{"type": "status_update", "source_id": "...", "state": "streaming"}`。
-
-### 5.3 异常恢复与保活 (Resilience)
-
-**场景 A: FFmpeg 意外挂掉 (Crash)**
-- 守护协程 `watchdog_loop` 每 1 秒轮询所有 `active_streams`。
-- 如果发现某进程 `poll() is not None` (已退出) 且 `returncode != 0`:
-    - 记录日志 `[ERROR] FFmpeg crashed!`.
-    - **自动重启**: 立即尝试重新 `Popen`（最多重试 3 次）。
-    - 超过 3 次失败，向 Core 发送 `{"type": "error", "msg": "Camera device failure"}`。
-
-**场景 B: Core 服务断开 (Network Split)**
-- WebSocket 抛出 `ConnectionClosed` 异常。
-- **保持推流**: 不要停止 FFmpeg！(也许网络只是抖动，SRS 还是通的)。
-- **静默重连**: 进入 `reconnect_loop`，指数退避尝试重连 Core。
-- 重连成功后，重新发送 `register`，并上报当前正在推流的状态（Core 可能重启过，需要同步状态）。
+1.  **查表**: 根据 `source_id` 找到对应的 Source 对象。
+2.  **生成命令**: 调用 `source.build_cmd(url)`。
+3.  **执行**: 启动 FFmpeg。
+4.  **反馈**: 发送 `status: streaming`。
 
 ---
 
