@@ -2,7 +2,7 @@
 
 ## 1. 系统物理拓扑图 (Physical Topology)
 
-本图展示了各个组件在网络中的位置及其交互协议。
+本图展示了各个组件在网络中的位置及其交互协议。系统原生支持 **N 个 Sender** 和 **M 个 Receiver** 的任意并发组合。
 
 ```mermaid
 graph TD
@@ -11,35 +11,42 @@ graph TD
     classDef server fill:#fff3e0,stroke:#e65100,stroke-width:2px;
     classDef media fill:#f3e5f5,stroke:#4a148c,stroke-width:2px;
 
-    %% 客户端层
-    subgraph "Client Layer"
-        Sender[Sender Device]:::client
-        Receiver[Receiver App]:::client
+    %% 客户端层 (Client Layer)
+    subgraph "Clients (N:M Concurrency)"
+        S1[Sender 1]:::client
+        Sn[Sender ... N]:::client
+        R1[Receiver 1]:::client
+        Rm[Receiver ... M]:::client
     end
 
-    %% 服务端层 (可部署在同一台机器或分开)
-    subgraph "Server Layer"
+    %% 服务端层 (Server Layer)
+    subgraph "Server Infrastructure"
         Core[Core Service]:::server
         SRS[SRS Media Server]:::media
-        FF[FFmpeg Worker]:::media
+        FF[FFmpeg Worker Pool]:::media
     end
 
-    %% 通信链路
+    %% 通信链路 (Links)
     %% 1. 发现
-    Sender -.->|"1. UDP Broadcast (9999)"| Core
+    S1 -.->|"1. UDP Broadcast"| Core
+    Sn -.->|"1. UDP Broadcast"| Core
     
     %% 2. 信令
-    Sender <==>|"2. WebSocket (8000)"| Core
-    Receiver <-->|"3. HTTP REST (8000)"| Core
+    S1 <==>|"2. WebSocket"| Core
+    Sn <==>|"2. WebSocket"| Core
+    R1 <-->|"3. HTTP REST"| Core
+    Rm <-->|"3. HTTP REST"| Core
     
     %% 3. 控制
-    Core -->|"4. Process Spawn"| FF
+    Core -->|"4. Process Spawn (1:1 per stream)"| FF
     SRS -.->|"5. HTTP Callback"| Core
     
     %% 4. 媒体流 (Media Plane)
-    Sender ==>|"6. RTMP Publish"| SRS
-    FF ==>|"7. RTMP Pull/Push"| SRS
-    SRS ==>|"8. WebRTC Play"| Receiver
+    S1 ==>|"6. RTMP Publish"| SRS
+    Sn ==>|"6. RTMP Publish"| SRS
+    FF ==>|"7. RTMP Pull/Push (Loopback)"| SRS
+    SRS ==>|"8. WebRTC Play (Fan-out)"| R1
+    SRS ==>|"8. WebRTC Play (Fan-out)"| Rm
 ```
 
 #### 图例说明 (Legend)
@@ -47,6 +54,7 @@ graph TD
 | 视觉元素 | 含义 | 协议示例 |
 | :--- | :--- | :--- |
 | **矩形颜色** | 🟦 客户端 (Client) <br> 🟧 业务服务 (Control Plane) <br> 🟪 媒体设施 (Data Plane) | - |
+| **多节点 (S1, Sn)** | **水平扩展** <br> 支持任意数量的设备并发接入。 | Sender 1...N |
 | **粗实线 (`==>`)** | **高带宽/重数据流** <br> 传输视频/音频数据包。 | RTMP, WebRTC |
 | **细实线 (`-->`)** | **控制指令/短连接** <br> 单向命令或 HTTP 请求。 | Process Spawn, REST API |
 | **双线 (`<==>`)** | **长连接** <br> 保持在线的双向信令通道。 | WebSocket |
