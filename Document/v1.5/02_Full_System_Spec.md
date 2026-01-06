@@ -84,24 +84,20 @@ Sender 启动后，必须完成以下步骤才能进入就绪状态：
     *   等待进程稳定 (Ready)。
 4.  **响应**: 返回播放地址 `webrtc://.../stream_360p`。
 
-### 3.3 切换分辨率 (Quality Switch)
-V1.5 采用 **"断开重连"** 模式，SRS 天然支持多播分发。
+### 3.3 切换分辨率与生命周期管理 (Quality Switch & Lifecycle)
 
-**场景描述**: 用户 A 从 1080p 切换到 360p。同时用户 B 正在观看 360p。
+V1.5 引入了**引用计数 (Reference Counting)** 机制来管理转码任务的生命周期，确保多人观看时流不断，无人观看时及时回收。
 
-1.  **Client 动作**:
-    - 用户 A 点击 "360p"。
-    - Client 销毁当前 WebRTC 连接 (Connection A)。
-    - Client 向 Core 请求 `/api/play?q=360p`。
-
-2.  **Core 响应**:
-    - 发现 `cam01_360p` 转码任务已存在（因为用户 B 在看）。
-    - 直接返回 URL: `webrtc://.../live/cam01_360p`。
-
-3.  **SRS 内部机制 (Fan-out)**:
-    - 用户 A 使用新 URL 发起 WHIP/WebRTC 连接。
-    - SRS 接受连接，将现有的 `live/cam01_360p` 数据流**复制一份**发给用户 A。
-    - **结果**: 用户 A 和用户 B 同时订阅了同一个 360p 流，SRS 的内存中只有一份 360p 的输入，但分发了两路输出。
+**场景：多人观看与退出**
+- **初始状态**: 用户 A 正在看 360p。TranscodeTask (cam01_360p) 活跃，`ref_count = 1`。
+- **加入**: 用户 B 也请求看 360p。Core 发现任务已存在，`ref_count++` (变为 2)，返回相同 URL。
+- **退出 (A)**: 用户 A 切换回 1080p 或关闭播放。
+    - A 发送 `stop_play` 或心跳超时。
+    - Core 执行 `ref_count--` (变为 1)。
+    - **关键判断**: `ref_count > 0`，转码继续。
+- **退出 (B)**: 用户 B 也离开。
+    - Core 执行 `ref_count--` (变为 0)。
+    - **回收**: `ref_count == 0`，Core 等待 5秒（防抖动），然后发送 `SIGTERM` 终止 FFmpeg 进程。
 
 ---
 
@@ -120,6 +116,7 @@ srs_log_tank        console;
 http_api {
     enabled         on;
     listen          1985;
+    on_close        http://127.0.0.1:8000/api/hooks/on_close; # 关键：利用回调辅助引用计数
 }
 
 rtc_server {
