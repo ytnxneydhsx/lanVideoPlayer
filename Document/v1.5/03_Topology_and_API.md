@@ -26,20 +26,20 @@ graph TD
 
     %% 通信链路
     %% 1. 发现
-    Sender -.->|1. UDP Broadcast (9999)| Core
+    Sender -.->|"1. UDP Broadcast (9999)"| Core
     
     %% 2. 信令
-    Sender <==>|2. WebSocket (8000)| Core
-    Receiver <-->|3. HTTP REST (8000)| Core
+    Sender <==>|"2. WebSocket (8000)"| Core
+    Receiver <-->|"3. HTTP REST (8000)"| Core
     
     %% 3. 控制
-    Core -->|4. Process Spawn| FF
-    SRS -.->|5. HTTP Callback| Core
+    Core -->|"4. Process Spawn"| FF
+    SRS -.->|"5. HTTP Callback"| Core
     
     %% 4. 媒体流 (Media Plane)
-    Sender ==>|6. RTMP Publish| SRS
-    FF ==>|7. RTMP Pull/Push| SRS
-    SRS ==>|8. WebRTC Play| Receiver
+    Sender ==>|"6. RTMP Publish"| SRS
+    FF ==>|"7. RTMP Pull/Push"| SRS
+    SRS ==>|"8. WebRTC Play"| Receiver
 ```
 
 ---
