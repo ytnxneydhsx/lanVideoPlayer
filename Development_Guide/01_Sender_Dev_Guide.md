@@ -189,9 +189,59 @@ common_output_args = [
 ```
 
 ### 3.3 进程管理 (`StreamManager`)
-- 维护 `active_streams: Dict[str, Popen]` 字典。
-- 使用 `asyncio.create_subprocess_exec` 启动进程。
-- 捕获 `stdout/stderr` 并重定向到 `logs/sender/ffmpeg.log`。
+
+本模块负责所有 FFmpeg 子进程的生命周期管理，包含**防抖**、**查重**和**优雅退出**逻辑。
+
+**核心方法：`start_stream(source_id, url)`**
+
+```python
+async def start_stream(self, source_id: str, cmd: List[str]):
+    # 1. 查重与防抖
+    if source_id in self.active_streams:
+        proc = self.active_streams[source_id]
+        if proc.poll() is None: # 还在运行
+            logger.info(f"Stream {source_id} restarting...")
+            self.stop_stream(source_id) # 强制停止旧进程
+            
+    # 2. 启动新进程
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        self.active_streams[source_id] = proc
+        logger.info(f"Stream {source_id} started (PID: {proc.pid})")
+        
+        # 3. 启动看门狗协程
+        asyncio.create_task(self._watchdog(source_id, proc))
+        
+    except Exception as e:
+        logger.error(f"Failed to start stream: {e}")
+```
+
+**核心方法：`stop_stream(source_id)`**
+
+```python
+def stop_stream(self, source_id: str):
+    if source_id not in self.active_streams:
+        return
+
+    proc = self.active_streams[source_id]
+    
+    # 1. 尝试优雅退出 (SIGTERM)
+    if proc.returncode is None:
+        proc.terminate()
+        try:
+            # 等待 2秒让 FFmpeg 写完 Trailer
+            await asyncio.wait_for(proc.wait(), timeout=2.0)
+        except asyncio.TimeoutError:
+            # 2. 强制杀进程 (SIGKILL)
+            logger.warning(f"Force killing stream {source_id}")
+            proc.kill()
+            
+    del self.active_streams[source_id]
+```
 
 ---
 
