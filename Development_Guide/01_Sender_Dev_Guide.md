@@ -5,72 +5,108 @@
 
 ## 1. 模块架构 (Internal Architecture)
 
-Sender 采用 **异步 IO (asyncio)** 驱动的主循环，内部管理着一个 FFmpeg 进程池。
+Sender 采用 **插槽式源架构 (Pluggable Source Architecture)**，支持摄像头、屏幕、文件等多种异构源的动态插拔。
 
 ```mermaid
 graph TD
     subgraph "Sender Process"
-        Main[Main Loop (Asyncio)]
+        Main[Main Loop]
         WS[WebSocket Client]
         Disc[UDP Discovery]
         Pool[FFmpeg Process Pool]
         
-        Disc -->|1. Found IP| WS
-        WS -->|2. Connect| Main
-        Main -->|3. Cmd Start| Pool
-        Pool -->|4. Popen| OS[OS Processes]
+        subgraph "Source Plugins (Slots)"
+            Cam[CameraSource]
+            Scr[ScreenSource]
+            File[FileSource]
+        end
+        
+        Disc -->|Found IP| WS
+        WS -->|Cmd Start| Main
+        Main -->|Load Plugin| Pool
+        Pool -->|Build Cmd| Cam
+        Pool -->|Build Cmd| Scr
+        Cam -->|Popen| FFmpeg1
+        Scr -->|Popen| FFmpeg2
     end
 ```
 
 ## 2. 关键类设计 (Class Design)
 
-### 2.1 `DiscoveryService` (`pipeline/discovery.py`)
-- **功能**: 循环发送 UDP 广播，直到收到 Core 响应。
-- **重试策略**: 指数退避 (1s, 2s, 4s, 8s...)，最大 30s。
+### 2.1 抽象源基类 (`pipeline/sources/base.py`)
+所有视频源必须继承此基类。
 
-### 2.2 `SignalingClient` (`pipeline/signaling.py`)
-- **功能**: 维护与 Core 的 WebSocket 长连接。
-- **心跳**: 每 5s 发送 `{"type": "ping"}`。
-- **断线重连**: 必须实现自动重连逻辑，重连期间**不停止**正在运行的推流任务（保持画面不断）。
+```python
+class BaseSource(ABC):
+    @abstractmethod
+    def list_available(self) -> List[dict]:
+        """
+        枚举可用设备。
+        return: [{"id": "cam0", "name": "Logitech", "type": "camera"}]
+        """
+        pass
 
-### 2.3 `StreamManager` (`pipeline/stream_mgr.py`)
-- **数据结构**: `active_streams: Dict[str, subprocess.Popen]`
-- **方法**:
-  - `start_stream(source_id, rtmp_url, config)`: 启动 FFmpeg。
-  - `stop_stream(source_id)`: 发送 SIGTERM，等待 5s，若不退则 SIGKILL。
-  - `get_status()`: 返回所有流的健康状态。
+    @abstractmethod
+    def build_ffmpeg_cmd(self, source_id: str, config: StreamConfig) -> List[str]:
+        """
+        生成 FFmpeg 输入参数。
+        """
+        pass
+```
+
+### 2.2 具体实现插件 (`pipeline/sources/impl/`)
+1.  **`CameraSource`**: 
+    - 负责调用系统 API (dshow/v4l2) 枚举物理摄像头。
+    - 自动匹配默认麦克风。
+2.  **`ScreenSource`**:
+    - 提供全屏捕获 (`desktop`)。
+    - 在 Windows 上使用 `gdigrab`，Linux 上使用 `x11grab`。
+3.  **`FileSource`**:
+    - 扫描指定目录下的 `.mp4` 文件。
+    - 使用 `-re` (Read Rate) 和 `-stream_loop -1` 模拟直播流。
 
 ---
 
-## 3. FFmpeg 极低延迟参数调优 (The Secret Sauce)
+## 3. FFmpeg 参数调优 (The Secret Sauce)
 
-这是本项目的核心竞争力。请严格按照以下参数配置 `ffmpeg_wrapper.py`。
-
-### 3.1 基础命令模板
+### 3.1 摄像头模式 (Camera Mode)
 ```python
+# CameraSource.build_ffmpeg_cmd()
 cmd = [
-    "ffmpeg",
-    "-f", input_format,       # Windows: dshow, Linux: v4l2, Mac: avfoundation
-    "-i", device_name,
-    "-c:v", "libx264",
-    "-preset", "ultrafast",   # 关键：最快编码速度
-    "-tune", "zerolatency",   # 关键：关闭帧缓存，即时输出
-    "-pix_fmt", "yuv420p",    # 兼容性最好
-    "-g", "60",               # GOP=60 (2秒一个关键帧)，平衡延迟与画质
-    "-b:v", bitrate,          # e.g., "2000k"
-    "-s", resolution,         # e.g., "1280x720"
-    "-f", "flv",
-    rtmp_url
+    "-f", "dshow",
+    "-i", f"video={dev_name}:audio={mic_name}",
+    "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+    "-c:a", "aac", "-b:a", "128k",
+    ...
 ]
 ```
 
-### 3.2 平台差异化 (Platform Specifics)
+### 3.2 屏幕共享模式 (Screen Mode)
+```python
+# ScreenSource.build_ffmpeg_cmd()
+cmd = [
+    "-f", "gdigrab",
+    "-framerate", "30",
+    "-i", "desktop",  # 捕获整个桌面
+    "-f", "dshow",    # 混入系统声音 (Stereo Mix) - 需要系统开启
+    "-i", "audio=Stereo Mix (Realtek)",
+    "-c:v", "libx264", "-preset", "ultrafast",
+    ...
+]
+```
 
-| 平台 | Input Format | Device Name 示例 | 备注 |
-| :--- | :--- | :--- | :--- |
-| **Windows** | `dshow` | `video="Integrated Camera"` | 需先运行 `ffmpeg -list_devices true -f dshow -i dummy` 获取名称 |
-| **Linux (RPi)** | `v4l2` | `/dev/video0` | 树莓派可尝试硬件编码 `-c:v h264_omx` |
-| **macOS** | `avfoundation` | `"0"` | 需授予终端摄像头权限 |
+### 3.3 虚拟文件模式 (File Mode)
+```python
+# FileSource.build_ffmpeg_cmd()
+cmd = [
+    "-re",            # 关键：按原生帧率读取，防止文件瞬间读完
+    "-stream_loop", "-1",
+    "-i", "/path/to/video.mp4",
+    "-c:v", "copy",   # 直接复制流，不转码 (节省 CPU)
+    "-c:a", "copy",
+    ...
+]
+```
 
 ---
 
@@ -87,9 +123,9 @@ Sender 的每个 Source 都有独立的状态流转：
 
 ### 5.1 启动全流程 (Startup Sequence)
 
-1.  **硬件自检**: 
-    - 运行 `ffmpeg -list_devices` 枚举本机所有摄像头。
-    - 生成 `sources_list` (e.g., `[{id: "cam0", name: "Integrated"}, {id: "cam1", name: "USB"}]`)。
+1.  **插件加载**: 
+    - 扫描 `pipeline/sources/impl/`，实例化所有 `BaseSource` 子类。
+    - 聚合生成全局 `sources_list`。
 2.  **寻找组织 (Discovery)**:
     - 启动 UDP Listener 监听 9999 端口。
     - 每 2 秒发送广播包 `{"magic": "lan_video_discovery_v1"}`。
@@ -103,14 +139,17 @@ Sender 的每个 Source 都有独立的状态流转：
 
 当收到 `cmd_start` 消息时：
 1.  **参数提取**: 获取 `source_id`, `rtmp_url`, `resolution`。
-2.  **冲突检查**: 
+2.  **插件路由**:
+    - 根据 `source_id` 找到对应的 Source 实例 (e.g., "cam01" -> CameraSource)。
+    - 调用 `source.build_ffmpeg_cmd(...)` 获取命令。
+3.  **冲突检查**: 
     - 检查 `active_streams` 中是否已有该 `source_id` 的任务？
     - 如果有，先执行 `stop_stream` 强制停止旧任务（重置）。
-3.  **启动进程**:
+4.  **启动进程**:
     - 组装 FFmpeg 命令。
     - `subprocess.Popen(cmd, stdout=PIPE, stderr=PIPE)`。
     - 将 `PID` 存入 `active_streams[source_id]`。
-4.  **状态反馈**: 向 Core 发送 `{"type": "status_update", "source_id": "...", "state": "streaming"}`。
+5.  **状态反馈**: 向 Core 发送 `{"type": "status_update", "source_id": "...", "state": "streaming"}`。
 
 ### 5.3 异常恢复与保活 (Resilience)
 
@@ -132,14 +171,19 @@ Sender 的每个 Source 都有独立的状态流转：
 ## 6. 开发任务清单 (Todo List)
 
 ### Phase 1: 基础联通
+- [ ] 定义 `BaseSource` 抽象类。
 - [ ] 实现 `DiscoveryService`: 能打印出 Core IP。
 - [ ] 实现 `SignalingClient`: 能连上 WS 并发送 `register`。
-- [ ] 编写 `hardware/camera.py`: 跨平台列出摄像头列表。
 
-### Phase 2: 推流引擎
+### Phase 2: 插件实现
+- [ ] 实现 `CameraSource`: 跨平台列出摄像头。
+- [ ] 实现 `ScreenSource`: 调研 Windows/Linux 的屏幕捕获命令。
+- [ ] 实现 `FileSource`: 遍历本地 `assets/` 目录。
+
+### Phase 3: 推流引擎
 - [ ] 实现 `FFmpegWrapper`: 封装 `subprocess.Popen`，支持日志重定向到 `logs/`。
 - [ ] 调试 Windows/Linux 下的 FFmpeg 参数，确保延迟 < 500ms。
 
-### Phase 3: 健壮性
+### Phase 4: 健壮性
 - [ ] 实现看门狗：当 FFmpeg 崩溃时自动重启。
 - [ ] 实现 TUI 界面 (使用 `Textual` 库)：显示实时码率和 CPU 占用。
