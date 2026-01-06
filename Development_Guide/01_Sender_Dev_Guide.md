@@ -164,7 +164,7 @@ sources:
 ```mermaid
 graph TD
     WS[Signal: cmd_start] --> Lookup{Find Source}
-    Lookup -->|Found| Build[source.build_cmd()]
+    Lookup -->|Found| Build["source.build_cmd()"]
     Lookup -->|Not Found| LogError[Log & Ignore]
     Build --> StopOld[Check & Stop Existing]
     StopOld --> Popen[subprocess.Popen]
