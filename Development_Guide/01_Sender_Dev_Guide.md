@@ -8,6 +8,25 @@
 Sender 采用 **插槽式源架构 (Pluggable Source Architecture)**，并完全由 **YAML 配置驱动**。
 
 ```mermaid
+graph TD
+    subgraph "Sender Process"
+        Main[Main Loop]
+        Conf[YAML Config Loader]
+        WS[WebSocket Client]
+        Disc[UDP Discovery]
+        StreamMgr[Stream Manager]
+        
+        Conf -->|Load sources.yaml| Main
+        Disc -->|Found IP| WS
+        WS -->|Cmd Start| Main
+        Main -->|Select Source| StreamMgr
+        StreamMgr -->|Popen| FFmpeg
+    end
+```
+
+## 2. 源插件系统 (Source Plugin System)
+
+```mermaid
 classDiagram
     %% 核心抽象
     class BaseSource {
@@ -44,8 +63,6 @@ classDiagram
     BaseSource <|-- FileSource
     SourceFactory ..> BaseSource : Instantiates
 ```
-
-## 2. 源插件系统 (Source Plugin System)
 
 ### 2.1 源基类 (`pipeline/sources/base.py`)
 ```python
@@ -140,9 +157,21 @@ sources:
 
 ## 3. 推流引擎 (Streaming Engine)
 
-为了保证 SRS 能够稳定接收，无论输入源是什么，输出流必须符合统一规范。
+推流引擎 (`StreamManager`) 是连接业务逻辑与底层 FFmpeg 进程的桥梁。
 
-### 3.1 输出标准化 (Output Consistency)
+### 3.1 核心工作流
+
+```mermaid
+graph TD
+    WS[Signal: cmd_start] --> Lookup{Find Source}
+    Lookup -->|Found| Build[source.build_cmd()]
+    Lookup -->|Not Found| LogError[Log & Ignore]
+    Build --> StopOld[Check & Stop Existing]
+    StopOld --> Popen[subprocess.Popen]
+    Popen --> Monitor[Watchdog Loop]
+```
+
+### 3.2 输出标准化 (Output Consistency)
 所有 Source 的 `build_cmd` 最后都必须追加以下参数：
 
 ```python
@@ -159,8 +188,8 @@ common_output_args = [
 ]
 ```
 
-### 3.2 进程管理 (`StreamManager`)
-- 维护 `active_streams` 字典。
+### 3.3 进程管理 (`StreamManager`)
+- 维护 `active_streams: Dict[str, Popen]` 字典。
 - 使用 `asyncio.create_subprocess_exec` 启动进程。
 - 捕获 `stdout/stderr` 并重定向到 `logs/sender/ffmpeg.log`。
 
