@@ -9,6 +9,10 @@ lanVideoPlayer/
 ├── .github/                # GitHub Actions CI/CD 配置
 ├── Document/               # 架构设计与产品文档 (V1.0, V1.5)
 ├── Development_Guide/      # 开发实施指南 (你现在看的地方)
+├── logs/                   # [新增] 全局日志归档目录 (GitIgnore 但必须存在)
+│   ├── core/               # Core 服务日志
+│   ├── sender/             # Sender 客户端日志
+│   └── receiver/           # Receiver 应用日志
 ├── src/                    # 核心源代码 (Monorepo 风格)
 │   ├── core/               # Core Service (Python)
 │   ├── sender/             # Sender Client (Python)
@@ -79,11 +83,23 @@ src/receiver/
 - **Python**: 每个模块独立 `requirements.txt`。不要搞一个全局的。
 - **Node**: 使用 `npm` 或 `yarn`，锁死 `lock` 文件。
 
-### 3.3 日志标准
-所有模块必须输出标准格式日志，以便 Docker 收集：
+### 3.3 日志标准 (Logging)
+系统采用 **Console + File** 双输出策略。
+
+**文件存储规范**:
+- 根目录: `logs/{module_name}/`
+- 命名格式: `{module_name}_{YYYY-MM-DD}.log` (按天轮转)
+  - 例如: `logs/core/core_2026-01-06.log`
+- 轮转策略: 保留最近 7 天日志，超过自动删除。
+
+**格式标准**:
 `[TIME] [LEVEL] [MODULE] - Message`
 示例：
 `2026-01-06 12:00:01 [INFO] [Core.Transcoder] - Started FFmpeg for cam01_360p (PID: 1024)`
+
+**实现建议**:
+- Python: 使用 `loguru` (强烈推荐) 或内置 `logging` 模块配置 `RotatingFileHandler`。
+- Electron: 使用 `electron-log`。
 
 ---
 
