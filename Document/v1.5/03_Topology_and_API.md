@@ -87,15 +87,23 @@ graph TD
 ```json
 [
   {
-    "id": "cam_01",
-    "status": "streaming",  // idle, streaming, transcoding
-    "source_resolution": "1920x1080",
-    "available_qualities": ["source", "720p", "360p"]
+    "device_id": "raspi_01",
+    "sources": [
+      {
+         "id": "cam_front",
+         "status": "streaming",
+         "available_qualities": ["source", "360p"]
+      },
+      {
+         "id": "screen_share",
+         "status": "idle"
+      }
+    ]
   }
 ]
 ```
 
-#### `POST /api/play/{device_id}`
+#### `POST /api/play/{device_id}/{source_id}`
 请求播放地址。
 
 **Request Body**:
@@ -108,14 +116,9 @@ graph TD
 **Response 200 OK**:
 ```json
 {
-  "url": "webrtc://192.168.1.100/live/cam_01_360p",
-  "mode": "transcoding" // or "direct"
+  "url": "webrtc://192.168.1.100/live/raspi_01_cam_front_360p",
+  "mode": "transcoding"
 }
-```
-
-**Response 400 Bad Request**:
-```json
-{ "error": "Requested quality exceeds source capability" }
 ```
 
 ---
@@ -125,40 +128,42 @@ graph TD
 **Endpoint**: `/ws/sender/{device_id}`
 
 #### 消息类型: `register` (Sender -> Core)
-连接建立后立即发送。
+连接建立后立即发送。上报该设备拥有的所有视频源。
 ```json
 {
   "type": "register",
   "capabilities": {
-    "max_res": "1920x1080",
-    "fps": 30
+    "sources": [
+       { "id": "cam_front", "max_res": "1080p", "type": "camera" },
+       { "id": "screen_share", "max_res": "4k", "type": "desktop" }
+    ]
   }
 }
 ```
 
 #### 消息类型: `cmd_start` (Core -> Sender)
-通知 Sender 开始推流。
+通知 Sender 启动某个特定的视频源。
 ```json
 {
   "type": "cmd_start",
   "params": {
-    "rtmp_url": "rtmp://192.168.1.100/live/cam_01",
-    "resolution": "1280x720", // 强制指定分辨率
+    "source_id": "cam_front", // 关键：指定启动哪个源
+    "rtmp_url": "rtmp://192.168.1.100/live/raspi_01_cam_front", // URL 必须包含 source_id 以防冲突
+    "resolution": "1280x720", 
     "bitrate": "2000k"
   }
 }
 ```
 
 #### 消息类型: `cmd_stop` (Core -> Sender)
-通知 Sender 停止推流（回到 IDLE）。
+通知 Sender 停止某个源。
 ```json
-{ "type": "cmd_stop" }
-```
-
-#### 消息类型: `heartbeat` (双向)
-每 5 秒发送一次。
-```json
-{ "type": "ping" } // or "pong"
+{ 
+  "type": "cmd_stop",
+  "params": {
+    "source_id": "cam_front"
+  }
+}
 ```
 
 ---
@@ -198,6 +203,6 @@ graph TD
   "ip": "192.168.1.105",
   "vhost": "__defaultVhost__",
   "app": "live",
-  "stream": "cam_01_360p" // 关键：通过 stream name 判断是哪个转码任务
+  "stream": "raspi_01_cam_front_360p" 
 }
 ```
