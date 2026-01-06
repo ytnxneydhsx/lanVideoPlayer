@@ -4,15 +4,16 @@
 
 ## 1. 根目录结构 (Root Directory)
 
+本项目采用 **多模块独立根目录 (Multi-Root)** 结构，废除 `src/` 统一目录，以确保各端在物理层面彻底隔离，便于独立打包与部署。
+
 ```text
 lanVideoPlayer/
 ├── .github/                # GitHub Actions CI/CD 配置
 ├── Document/               # 架构设计与产品文档 (V1.0, V1.5)
 ├── Development_Guide/      # 开发实施指南 (你现在看的地方)
-├── src/                    # 核心源代码 (Monorepo 风格)
-│   ├── core/               # Core Service (Python)
-│   ├── sender/             # Sender Client (Python)
-│   └── receiver/           # Receiver App (Electron/React)
+├── core/                   # [独立模块] Core Service (Python)
+├── sender/                 # [独立模块] Sender Client (Python)
+├── receiver/               # [独立模块] Receiver App (Electron/React)
 ├── deploy/                 # 部署相关 (Docker, SRS Conf)
 ├── tests/                  # 集成测试用例
 ├── .gitignore
@@ -21,12 +22,12 @@ lanVideoPlayer/
 
 ## 2. 模块详细结构 (Module Details)
 
-### 2.1 Core Service (`src/core`)
+### 2.1 Core Service (`/core`)
 负责信令交互与转码调度。
 **部署**: 通常部署在高性能服务器或云主机上。
 
 ```text
-src/core/
+core/
 ├── logs/                   # [新增] 本地日志目录 (GitIgnore)
 │   └── core_2026-01-06.log
 ├── main.py                 # 启动入口 (FastAPI app)
@@ -41,12 +42,12 @@ src/core/
 └── requirements.txt
 ```
 
-### 2.2 Sender Client (`src/sender`)
+### 2.2 Sender Client (`/sender`)
 负责采集与推流。
 **部署**: 运行在树莓派、工控机等边缘设备上。
 
 ```text
-src/sender/
+sender/
 ├── logs/                   # [新增] 本地日志目录 (GitIgnore)
 │   └── sender_2026-01-06.log
 ├── main.py                 # 启动入口
@@ -58,12 +59,12 @@ src/sender/
 └── requirements.txt
 ```
 
-### 2.3 Receiver App (`src/receiver`)
+### 2.3 Receiver App (`/receiver`)
 负责播放与交互。
 **部署**: 运行在用户 PC 或 Mac 上。
 
 ```text
-src/receiver/
+receiver/
 ├── logs/                   # [新增] 本地日志目录 (Electron UserData)
 ├── main/                   # Electron 主进程
 ├── renderer/               # React 渲染进程
