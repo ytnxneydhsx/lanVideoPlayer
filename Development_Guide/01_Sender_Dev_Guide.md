@@ -325,3 +325,56 @@ Receiver 点击播放，Core 下发指令。
 [INFO] [FFmpeg] Process 4490 terminated.
 [INFO] [Sender] All streams stopped. Returning to IDLE.
 ```
+
+---
+
+## 7. 接口契约 (Interface Contracts)
+
+### 7.1 内部模块调用 (Internal Python API)
+
+**DiscoveryService -> MainLoop**
+```python
+# Callback when Core is found
+async def on_core_found(ip: str, port: int):
+    pass
+```
+
+**WebSocket -> MainLoop**
+```python
+# Callbacks for received commands
+async def on_cmd_start(source_id: str, rtmp_url: str, params: dict):
+    pass
+
+async def on_cmd_stop(source_id: str):
+    pass
+```
+
+**MainLoop -> StreamManager**
+```python
+async def start_stream(source_id: str, cmd: List[str]):
+    """
+    启动流。如果已存在，先停止再启动。
+    :param cmd: 完整的 FFmpeg 命令列表
+    """
+    pass
+
+def stop_stream(source_id: str):
+    """
+    停止流。发送 SIGTERM -> wait 2s -> SIGKILL。
+    """
+    pass
+```
+
+### 7.2 外部通信协议 (External Protocol)
+
+Sender 对外表现为**被动接受指令**的 WebSocket 客户端。
+
+**Outbound (Sender -> Core)**
+- **Register**: `{"type": "register", "capabilities": {...}}`
+- **Heartbeat**: `{"type": "ping"}`
+- **Status**: `{"type": "status_update", "source_id": "cam1", "state": "streaming"}`
+- **Error**: `{"type": "error", "source_id": "cam1", "msg": "ffmpeg crash"}`
+
+**Inbound (Core -> Sender)**
+- **Start**: `{"type": "cmd_start", "params": {...}}`
+- **Stop**: `{"type": "cmd_stop", "params": {"source_id": "..."}}`
