@@ -42,6 +42,16 @@ graph TD
     SRS ==>|"8. WebRTC Play"| Receiver
 ```
 
+#### 图例说明 (Legend)
+
+| 视觉元素 | 含义 | 协议示例 |
+| :--- | :--- | :--- |
+| **矩形颜色** | 🟦 客户端 (Client) <br> 🟧 业务服务 (Control Plane) <br> 🟪 媒体设施 (Data Plane) | - |
+| **粗实线 (`==>`)** | **高带宽/重数据流** <br> 传输视频/音频数据包。 | RTMP, WebRTC |
+| **细实线 (`-->`)** | **控制指令/短连接** <br> 单向命令或 HTTP 请求。 | Process Spawn, REST API |
+| **双线 (`<==>`)** | **长连接** <br> 保持在线的双向信令通道。 | WebSocket |
+| **虚线 (`-.->`)** | **异步/事件** <br> 广播消息或回调通知。 | UDP Broadcast, Webhook |
+
 ---
 
 ## 2. 通信协议矩阵 (Communication Matrix)
