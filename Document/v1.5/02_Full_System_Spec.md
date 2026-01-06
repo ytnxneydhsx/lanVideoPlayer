@@ -23,40 +23,41 @@ LanVideoPlayer 是一个高内聚、低耦合的局域网视频传输系统。V1
 
 ## 2. 总体架构图 (The Big Picture)
 
-系统由控制平面 (Control Plane) 和数据平面 (Data Plane) 组成。
+系统由三个主要物理角色（Clients, Server Side）和两个逻辑平面（Control Plane, Data Plane）组成。
+
+### 2.1 拓扑结构
 
 ```mermaid
 graph TD
-    %% 角色定义
-    subgraph "Clients"
-        S[Sender (采集端)]
-        R[Receiver (播放端)]
+    %% 控制流
+    subgraph "Control Plane (Signaling & Mgmt)"
+        Core[Core Service]
+        TM[Transcoder Manager]
+        Core --- TM
     end
 
-    subgraph "Server Side"
-        subgraph "Core Service (Brain)"
-            Disc[UDP Discovery]
-            Sig[WebSocket Signaling]
-            TM[Transcoder Manager]
-        end
+    %% 数据流
+    subgraph "Data Plane (Media Pipeline)"
+        SRS[SRS Media Server]
+        FF[FFmpeg Transcoder]
         
-        subgraph "Media Infrastructure"
-            SRS[SRS 5.0]
-            FF[FFmpeg Transcoder]
-        end
+        %% Path A: 直通
+        Sender_A[Sender (1080p)] == RTMP ==> SRS
+        SRS == WebRTC ==> Receiver_A[Receiver (1080p)]
+        
+        %% Path B: 转码
+        Sender_B[Sender (1080p)] == RTMP ==> SRS
+        SRS -- RTMP Pull --> FF
+        FF -- RTMP Push (360p) --> SRS
+        SRS == WebRTC (360p) ==> Receiver_B[Receiver (360p)]
     end
-
-    %% 连接关系
-    S -. 1. UDP Broadcast .-> Disc
-    S <== 2. WS Connect ==> Sig
     
-    R -- 3. POST /play?q=360p --> Sig
-    Sig -- 4. Spawn --> FF
-    
-    S -- 5. RTMP Push (Source) --> SRS
-    FF -- 6. Pull & Transcode --> SRS
-    FF -- 7. Push (360p) --> SRS
-    SRS -- 8. WebRTC Play --> R
+    %% 控制关联
+    Core -. WS Commands .-> Sender_A
+    Core -. WS Commands .-> Sender_B
+    Receiver_A -. HTTP API .-> Core
+    Receiver_B -. HTTP API .-> Core
+    TM -. Process Control .-> FF
 ```
 
 ---
