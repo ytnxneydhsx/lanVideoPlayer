@@ -5,79 +5,129 @@
 
 ## 1. 模块架构 (Internal Architecture)
 
-Sender 采用 **插槽式源架构 (Pluggable Source Architecture)**，支持摄像头、屏幕、文件等多种异构源的动态插拔。
+Sender 采用 **插槽式源架构 (Pluggable Source Architecture)**，并完全由 **YAML 配置驱动**。
 
 ```mermaid
-graph TD
-    subgraph "Sender Process"
-        Main[Main Loop]
-        WS[WebSocket Client]
-        Disc[UDP Discovery]
-        Pool[FFmpeg Process Pool]
-        
-        subgraph "Source Plugins (Slots)"
-            Cam[CameraSource]
-            Scr[ScreenSource]
-            File[FileSource]
-        end
-        
-        Disc -->|Found IP| WS
-        WS -->|Cmd Start| Main
-        Main -->|Load Plugin| Pool
-        Pool -->|Build Cmd| Cam
-        Pool -->|Build Cmd| Scr
-        Cam -->|Popen| FFmpeg1
-        Scr -->|Popen| FFmpeg2
-    end
+classDiagram
+    %% 核心抽象
+    class BaseSource {
+        <<Abstract>>
+        +str id
+        +str type
+        +dict config
+        +build_cmd(rtmp_url, params) List[str]
+    }
+
+    %% 具体实现 (插槽适配器)
+    class CameraSource {
+        +video_device: str
+        +audio_device: str
+        +build_cmd() -> "-f dshow -i video=..."
+    }
+    class ScreenSource {
+        +capture_cursor: bool
+        +build_cmd() -> "-f gdigrab -i desktop"
+    }
+    class FileSource {
+        +file_path: str
+        +loop: bool
+        +build_cmd() -> "-re -i movie.mp4"
+    }
+
+    %% 工厂模式
+    class SourceFactory {
+        +create_source(config) BaseSource
+    }
+    
+    BaseSource <|-- CameraSource
+    BaseSource <|-- ScreenSource
+    BaseSource <|-- FileSource
+    SourceFactory ..> BaseSource : Instantiates
 ```
 
 ## 2. 关键类设计 (Class Design)
 
-### 2.1 抽象源基类 (`pipeline/sources/base.py`)
-所有视频源必须继承此基类。
-
+### 2.1 源基类 (`pipeline/sources/base.py`)
 ```python
 class BaseSource(ABC):
+    def __init__(self, config: dict):
+        self.id = config['id']
+        self.enabled = config.get('enabled', True)
+        
     @abstractmethod
-    def list_available(self) -> List[dict]:
+    def build_cmd(self, rtmp_url: str, override_params: dict) -> List[str]:
         """
-        枚举可用设备。
-        return: [{"id": "cam0", "name": "Logitech", "type": "camera"}]
-        """
-        pass
-
-    @abstractmethod
-    def build_ffmpeg_cmd(self, source_id: str, config: StreamConfig) -> List[str]:
-        """
-        生成 FFmpeg 输入参数。
+        生成 FFmpeg 完整命令列表。
+        必须包含输出格式标准化参数 (-c:v libx264 -f flv)。
         """
         pass
 ```
 
 ### 2.2 具体实现插件 (`pipeline/sources/impl/`)
-1.  **`CameraSource`**: 
-    - 负责调用系统 API (dshow/v4l2) 枚举物理摄像头。
-    - 自动匹配默认麦克风。
-2.  **`ScreenSource`**:
-    - 提供全屏捕获 (`desktop`)。
-    - 在 Windows 上使用 `gdigrab`，Linux 上使用 `x11grab`。
-3.  **`FileSource`**:
-    - 扫描指定目录下的 `.mp4` 文件。
-    - 使用 `-re` (Read Rate) 和 `-stream_loop -1` 模拟直播流。
+
+**CameraSource (音视频绑定)**:
+```python
+class CameraSource(BaseSource):
+    def __init__(self, config):
+        super().__init__(config)
+        # 从配置中绑定具体的物理设备名
+        self.video_dev = config['ffmpeg']['video_device']
+        self.audio_dev = config['ffmpeg'].get('audio_device') # 可选
+
+    def build_cmd(self, rtmp_url, params):
+        # 组装输入源字符串: video="Cam":audio="Mic"
+        input_str = f"video={self.video_dev}"
+        if self.audio_dev:
+            input_str += f":audio={self.audio_dev}"
+            
+        cmd = ["ffmpeg", "-f", "dshow", "-i", input_str]
+        # ...后续添加标准化输出参数...
+        return cmd
+```
+
+### 2.3 配置文件 (`config/sources.yaml`)
+这是 Sender 的“控制面板”。
+
+```yaml
+sources:
+  - id: "front_cam"
+    type: "camera"
+    ffmpeg:
+      format: "dshow"
+      video_device: "Integrated Camera"
+      audio_device: "Microphone Array"
+  
+  - id: "screen_share"
+    type: "screen"
+    ffmpeg:
+      format: "gdigrab"
+      framerate: 30
+
+  - id: "loop_video"
+    type: "file"
+    path: "./assets/demo.mp4"
+```
 
 ---
 
-## 3. FFmpeg 参数调优 (The Secret Sauce)
+## 3. FFmpeg 参数调优与标准化 (Standardization)
 
-### 3.1 摄像头模式 (Camera Mode)
+为了保证 SRS 能够稳定接收，无论输入源是什么，输出流必须符合统一规范。
+
+### 3.1 输出标准化 (Output Consistency)
+所有 Source 的 `build_cmd` 最后都必须追加以下参数：
+
 ```python
-# CameraSource.build_ffmpeg_cmd()
-cmd = [
-    "-f", "dshow",
-    "-i", f"video={dev_name}:audio={mic_name}",
-    "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-    "-c:a", "aac", "-b:a", "128k",
-    ...
+common_output_args = [
+    "-c:v", "libx264",      # 强制 H.264 编码
+    "-preset", "ultrafast", # 极速编码
+    "-tune", "zerolatency", # 零延迟调优
+    "-pix_fmt", "yuv420p",  # 浏览器兼容性必须
+    "-g", "60",             # GOP=60 (2秒关键帧)
+    "-c:a", "aac",          # 强制 AAC 音频
+    "-b:a", "128k",
+    "-f", "flv",            # RTMP 必须用 FLV 容器
+    rtmp_url
 ]
 ```
 
@@ -90,21 +140,7 @@ cmd = [
     "-i", "desktop",  # 捕获整个桌面
     "-f", "dshow",    # 混入系统声音 (Stereo Mix) - 需要系统开启
     "-i", "audio=Stereo Mix (Realtek)",
-    "-c:v", "libx264", "-preset", "ultrafast",
-    ...
-]
-```
-
-### 3.3 虚拟文件模式 (File Mode)
-```python
-# FileSource.build_ffmpeg_cmd()
-cmd = [
-    "-re",            # 关键：按原生帧率读取，防止文件瞬间读完
-    "-stream_loop", "-1",
-    "-i", "/path/to/video.mp4",
-    "-c:v", "copy",   # 直接复制流，不转码 (节省 CPU)
-    "-c:a", "copy",
-    ...
+    ...common_output_args
 ]
 ```
 
@@ -168,22 +204,51 @@ Sender 的每个 Source 都有独立的状态流转：
 
 ---
 
-## 6. 开发任务清单 (Todo List)
+## 6. 全流程实战演练 (Walkthrough Example)
 
-### Phase 1: 基础联通
-- [ ] 定义 `BaseSource` 抽象类。
-- [ ] 实现 `DiscoveryService`: 能打印出 Core IP。
-- [ ] 实现 `SignalingClient`: 能连上 WS 并发送 `register`。
+以下展示一个完整的生命周期日志。
 
-### Phase 2: 插件实现
-- [ ] 实现 `CameraSource`: 跨平台列出摄像头。
-- [ ] 实现 `ScreenSource`: 调研 Windows/Linux 的屏幕捕获命令。
-- [ ] 实现 `FileSource`: 遍历本地 `assets/` 目录。
+### Step 1: 准备 (Configure)
+用户编辑 `sources.yaml`:
+```yaml
+sources:
+  - id: "front_cam"
+    type: "camera"
+    ffmpeg: { video_device: "Logitech C920" }
+```
 
-### Phase 3: 推流引擎
-- [ ] 实现 `FFmpegWrapper`: 封装 `subprocess.Popen`，支持日志重定向到 `logs/`。
-- [ ] 调试 Windows/Linux 下的 FFmpeg 参数，确保延迟 < 500ms。
+### Step 2: 启动 (Boot)
+```text
+[INFO] [Sender] Loaded 1 sources from config.
+[INFO] [Discovery] Sending UDP broadcast...
+[INFO] [Discovery] Found Core at 192.168.1.100
+[INFO] [WS] Connected to ws://192.168.1.100:8000
+[INFO] [WS] Sent Register: {sources: ["front_cam"]}
+```
 
-### Phase 4: 健壮性
-- [ ] 实现看门狗：当 FFmpeg 崩溃时自动重启。
-- [ ] 实现 TUI 界面 (使用 `Textual` 库)：显示实时码率和 CPU 占用。
+### Step 3: 点播 (On Demand)
+Receiver 点击播放，Core 下发指令。
+```text
+[INFO] [WS] Received cmd_start: {source_id: "front_cam", res: "720p"}
+[INFO] [FFmpeg] Executing: ffmpeg -f dshow ... -s 1280x720 ...
+[INFO] [FFmpeg] Process started (PID: 4452)
+```
+
+### Step 4: 控制 (Control)
+管理员强制切换为 1080p。
+```text
+[INFO] [WS] Received cmd_start: {source_id: "front_cam", res: "1080p"}
+[INFO] [StreamMgr] Stopping existing stream (PID: 4452)
+[INFO] [FFmpeg] Process 4452 terminated.
+[INFO] [FFmpeg] Executing: ffmpeg -f dshow ... -s 1920x1080 ...
+[INFO] [FFmpeg] Process started (PID: 4490)
+```
+
+### Step 5: 闲置 (Idle)
+无人观看，Core 下发停止指令。
+```text
+[INFO] [WS] Received cmd_stop: {source_id: "front_cam"}
+[INFO] [StreamMgr] Stopping stream (PID: 4490)
+[INFO] [FFmpeg] Process 4490 terminated.
+[INFO] [Sender] All streams stopped. Returning to IDLE.
+```
