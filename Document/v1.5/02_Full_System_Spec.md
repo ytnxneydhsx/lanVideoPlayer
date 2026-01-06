@@ -55,7 +55,8 @@ graph TD
     
     S -- 5. RTMP Push (Source) --> SRS
     FF -- 6. Pull & Transcode --> SRS
-    SRS -- 7. WebRTC Play --> R
+    FF -- 7. Push (360p) --> SRS
+    SRS -- 8. WebRTC Play --> R
 ```
 
 ---
@@ -92,24 +93,68 @@ V1.5 采用 **"断开重连"** 模式：
 
 ---
 
-## 4. 模块详细规格
+## 4. 媒体管道详设 (Media Pipeline)
 
-### 4.1 Core Service (Python)
-- **API**: FastAPI
-- **Transcoder Manager**: 负责管理 FFmpeg 子进程，具备“看门狗”功能，30s 无人观看自动杀进程。
-- **配置**: `config.yaml` 定义默认策略（如：默认是否允许转码，最大并发转码数）。
+### 4.1 SRS 部署与配置 (Configuration)
+SRS 作为纯粹的数据交换中心，需开启 RTMP 推流端口 (1935) 和 WebRTC 播放端口 (8000/UDP)。
 
-### 4.2 Sender (Python TUI)
-- **FFmpeg 封装**: 使用 `subprocess` 调用，参数必须包含 `-tune zerolatency`。
-- **指令响应**: 需处理 `cmd_start`, `cmd_stop`, `cmd_reconfigure` 指令。
+**srs.conf 核心配置片段**:
+```nginx
+listen              1935;
+max_connections     1000;
+daemon              off;
+srs_log_tank        console;
 
-### 4.3 Receiver (Electron)
-- **UI**: 增加清晰度选择下拉框 `[Source, 720p, 360p]`。
-- **逻辑**: 播放前先调用 `/api/streams` 获取 Sender 的 `source_resolution`，以此动态生成下拉选项（不显示高于源的选项）。
+http_api {
+    enabled         on;
+    listen          1985;
+}
 
-### 4.4 SRS (Media Server)
-- **配置**: 开启 WebRTC, RTMP, HTTP-API。
-- **职责**: 纯粹的流转发与分发，不处理业务逻辑。
+rtc_server {
+    enabled         on;
+    listen          8000;
+    candidate       $CANDIDATE; # 自动获取本机 IP
+}
+
+vhost __defaultVhost__ {
+    rtc {
+        enabled     on;
+        rtmp_to_rtc on;    # 关键：开启 RTMP -> WebRTC 协议转换
+        rtc_to_rtmp off;
+    }
+    http_remux {
+        enabled     off;   # 本项目不使用 HTTP-FLV/HLS
+    }
+}
+```
+
+### 4.2 流地址命名规范 (URL Schema)
+系统严格遵守以下命名约定，以区分“原始流”和“转码流”。
+
+**基本格式**: `rtmp://{server_ip}/live/{stream_key}`
+
+| 流类型 | Stream Key 规则 | 示例 (Sender ID=cam01) | 说明 |
+| :--- | :--- | :--- | :--- |
+| **原始流 (Source)** | `{sender_id}` | `cam01` | Sender 推送的唯一地址 |
+| **转码流 (360p)** | `{sender_id}_360p` | `cam01_360p` | FFmpeg 产出的低清流 |
+| **转码流 (720p)** | `{sender_id}_720p` | `cam01_720p` | FFmpeg 产出的高清流 |
+
+### 4.3 管道建立过程 (Channel Establishment)
+
+**场景：直通模式 (Source Pass-through)**
+1.  **Sender**: 推送 `rtmp://.../live/cam01`。
+2.  **SRS**: 接收 RTMP 包，建立 `live/cam01` 频道。自动将其转封装为 WebRTC 格式。
+3.  **Receiver**: 请求播放 `webrtc://.../live/cam01`。
+4.  **SRS**: 将内存中的音视频包发送给 Receiver。
+
+**场景：转码模式 (Transcoding Mode)**
+1.  **Sender**: 推送 `rtmp://.../live/cam01`。
+2.  **Core (FFmpeg)**:
+    - **Pull**: 从 SRS 拉取 `rtmp://.../live/cam01`。
+    - **Process**: 解码 -> 缩放 -> 编码。
+    - **Push**: 推送回 SRS `rtmp://.../live/cam01_360p`。
+3.  **SRS**: 此时内存中存在两个独立的频道：`cam01` 和 `cam01_360p`。
+4.  **Receiver**: 请求播放 `webrtc://.../live/cam01_360p`。
 
 ---
 
