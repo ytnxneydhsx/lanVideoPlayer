@@ -78,10 +78,10 @@ graph TD
 
 ## 3. 接口定义 (API Specification)
 
-### 3.1 HTTP REST API (面向 Receiver)
+### 3.1 HTTP REST API (面向 Receiver/Admin)
 
 #### `GET /api/streams`
-获取当前在线设备列表。
+获取当前在线设备及其所有视频源的状态。
 
 **Response 200 OK**:
 ```json
@@ -104,7 +104,7 @@ graph TD
 ```
 
 #### `POST /api/play/{device_id}/{source_id}`
-请求播放地址。
+请求播放地址（被动触发）。
 
 **Request Body**:
 ```json
@@ -119,6 +119,26 @@ graph TD
   "url": "webrtc://192.168.1.100/live/raspi_01_cam_front_360p",
   "mode": "transcoding"
 }
+```
+
+#### `POST /api/admin/control` (New in V1.5)
+管理员强制控制接口（主动触发）。可用于实时开关特定视频源。
+
+**Request Body**:
+```json
+{
+  "device_id": "raspi_01",
+  "source_id": "cam_front",
+  "action": "start", // or "stop"
+  "params": {       // Optional for start
+    "resolution": "720p"
+  }
+}
+```
+
+**Response 200 OK**:
+```json
+{ "success": true, "message": "Command sent to sender" }
 ```
 
 ---
